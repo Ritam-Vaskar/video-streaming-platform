@@ -61,6 +61,122 @@ docker compose up --build
 
 3. Open frontend: `http://localhost:3000`
 
+## Deploy On Azure Student ($100 Credit)
+
+This architecture uses RTMP (`1935`) + HLS (`8080`) + API (`5000`) + frontend (`80`), so the most reliable Azure Student path is **one Ubuntu VM with Docker Compose**.
+
+### 1. Create Resources (Local Machine with Azure CLI)
+
+```bash
+az login
+az account set --subscription "<YOUR_AZURE_STUDENT_SUBSCRIPTION_NAME_OR_ID>"
+
+az group create --name rg-pulsecast --location centralindia
+
+az vm create \
+  --resource-group rg-pulsecast \
+  --name vm-pulsecast \
+  --image Ubuntu2204 \
+  --size Standard_B2s \
+  --admin-username azureuser \
+  --generate-ssh-keys
+
+az vm open-port --resource-group rg-pulsecast --name vm-pulsecast --port 80
+az vm open-port --resource-group rg-pulsecast --name vm-pulsecast --port 5000
+az vm open-port --resource-group rg-pulsecast --name vm-pulsecast --port 8080
+az vm open-port --resource-group rg-pulsecast --name vm-pulsecast --port 1935
+```
+
+Get public IP:
+
+```bash
+az vm show -d -g rg-pulsecast -n vm-pulsecast --query publicIps -o tsv
+```
+
+### 2. SSH Into VM And Install Docker
+
+```bash
+ssh azureuser@<VM_PUBLIC_IP>
+
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl gnupg
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+sudo chmod a+r /etc/apt/keyrings/docker.gpg
+
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
+  $(. /etc/os-release && echo $VERSION_CODENAME) stable" | \
+  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+sudo usermod -aG docker $USER
+newgrp docker
+```
+
+### 3. Copy Project To VM
+
+On your local machine:
+
+```bash
+scp -r "./video-streaming-platform" azureuser@<VM_PUBLIC_IP>:~/
+```
+
+On VM:
+
+```bash
+cd ~/video-streaming-platform
+cp .env.example .env
+```
+
+Edit `.env` for VM public IP:
+
+```env
+FRONTEND_PORT=80
+API_PORT=5000
+RTMP_PORT=1935
+HLS_PORT=8080
+
+CORS_ORIGIN=http://<VM_PUBLIC_IP>
+VITE_API_URL=http://<VM_PUBLIC_IP>:5000
+VITE_HLS_URL=http://<VM_PUBLIC_IP>:8080/hls
+VITE_SOCKET_URL=http://<VM_PUBLIC_IP>:5000
+HIGHLIGHTS_PUBLIC_BASE=http://<VM_PUBLIC_IP>:5000/media/highlights
+
+JWT_SECRET=<use-a-long-random-secret>
+```
+
+### 4. Run In Production Mode
+
+```bash
+docker compose --env-file .env up -d --build
+docker compose ps
+```
+
+Open frontend:
+
+`http://<VM_PUBLIC_IP>`
+
+### 5. YouTube Live Key Usage
+
+1. Login with broadcaster user.
+2. Paste YouTube stream key into `YouTube RTMP Stream Key`.
+3. Start stream from browser.
+
+Backend forwards to:
+
+`rtmp://a.rtmp.youtube.com/live2/<your-youtube-key>`
+
+### 6. Useful Ops Commands
+
+```bash
+docker compose logs -f backend
+docker compose logs -f rtmp
+docker compose restart backend
+docker compose down
+```
+
 ## How To Use
 
 1. In **Broadcaster** mode:
