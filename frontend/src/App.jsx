@@ -44,14 +44,24 @@ function PulseBars({ pulses }) {
 }
 
 export default function App() {
+  const [email, setEmail] = useState("broadcaster@pulsecast.local");
+  const [password, setPassword] = useState("Broadcaster@123");
+  const [authToken, setAuthToken] = useState(() => localStorage.getItem("pulsecast.token") || "");
+  const [user, setUser] = useState(() => {
+    const raw = localStorage.getItem("pulsecast.user");
+    return raw ? JSON.parse(raw) : null;
+  });
+
   const [mode, setMode] = useState("broadcaster");
   const [streamKey, setStreamKey] = useState("");
   const [generated, setGenerated] = useState(null);
+  const [youtubeKey, setYoutubeKey] = useState("");
   const [broadcasting, setBroadcasting] = useState(false);
   const [liveStatus, setLiveStatus] = useState(false);
   const [error, setError] = useState("");
   const [activity, setActivity] = useState([]);
   const [pulses, setPulses] = useState([]);
+  const [highlights, setHighlights] = useState([]);
 
   const localVideoRef = useRef(null);
   const viewerVideoRef = useRef(null);
@@ -59,6 +69,33 @@ export default function App() {
   const mediaRecorderRef = useRef(null);
   const socketRef = useRef(null);
   const hlsRef = useRef(null);
+
+  useEffect(() => {
+    if (!authToken) {
+      return;
+    }
+
+    fetch(`${API_BASE}/api/auth/me`, {
+      headers: {
+        Authorization: `Bearer ${authToken}`
+      }
+    })
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error("Session expired");
+        }
+        return response.json();
+      })
+      .then((payload) => {
+        setUser(payload.user);
+      })
+      .catch(() => {
+        setAuthToken("");
+        setUser(null);
+        localStorage.removeItem("pulsecast.token");
+        localStorage.removeItem("pulsecast.user");
+      });
+  }, [authToken]);
 
   useEffect(() => {
     return () => {
@@ -72,7 +109,12 @@ export default function App() {
 
   function ensureSocket() {
     if (!socketRef.current) {
-      socketRef.current = io(SOCKET_URL, { transports: ["websocket"] });
+      socketRef.current = io(SOCKET_URL, {
+        transports: ["websocket"],
+        auth: {
+          token: authToken
+        }
+      });
 
       socketRef.current.on("connect_error", () => {
         setError("Socket connection failed. Check backend availability.");
@@ -82,6 +124,7 @@ export default function App() {
         setLiveStatus(Boolean(payload.isLive));
         setPulses(payload.pulses || []);
         setActivity(payload.activity || []);
+        setHighlights(payload.highlights || []);
       });
 
       socketRef.current.on("stream:status", ({ isLive }) => {
@@ -100,6 +143,10 @@ export default function App() {
         setActivity((prev) => [...prev.slice(-29), event]);
       });
 
+      socketRef.current.on("stream:highlights", ({ highlights: nextHighlights }) => {
+        setHighlights(nextHighlights || []);
+      });
+
       socketRef.current.on("error:stream", ({ message }) => {
         setError(message || "A stream error occurred.");
       });
@@ -108,10 +155,65 @@ export default function App() {
     return socketRef.current;
   }
 
+  function isBroadcaster() {
+    return user?.role === "broadcaster" || user?.role === "admin";
+  }
+
+  async function login() {
+    setError("");
+    const response = await fetch(`${API_BASE}/api/auth/login`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ email, password })
+    });
+
+    if (!response.ok) {
+      setError("Login failed. Check email/password.");
+      return;
+    }
+
+    const payload = await response.json();
+    setAuthToken(payload.token);
+    setUser(payload.user);
+    localStorage.setItem("pulsecast.token", payload.token);
+    localStorage.setItem("pulsecast.user", JSON.stringify(payload.user));
+
+    if (socketRef.current) {
+      socketRef.current.disconnect();
+      socketRef.current = null;
+    }
+  }
+
+  function logout() {
+    stopBroadcast();
+    stopViewer();
+    setUser(null);
+    setAuthToken("");
+    localStorage.removeItem("pulsecast.token");
+    localStorage.removeItem("pulsecast.user");
+
+    if (socketRef.current) {
+      socketRef.current.disconnect();
+      socketRef.current = null;
+    }
+  }
+
   async function createSession() {
     setError("");
+    if (!isBroadcaster() || !authToken) {
+      setError("Broadcaster login required.");
+      return;
+    }
+
     const response = await fetch(`${API_BASE}/api/stream/session`, {
-      method: "POST"
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${authToken}`
+      },
+      body: JSON.stringify({ youtubeKey })
     });
 
     if (!response.ok) {
@@ -121,6 +223,7 @@ export default function App() {
     const session = await response.json();
     setGenerated(session);
     setStreamKey(session.streamKey);
+    setHighlights([]);
   }
 
   async function startCamera() {
@@ -139,6 +242,11 @@ export default function App() {
 
   async function startBroadcast() {
     setError("");
+    if (!isBroadcaster()) {
+      setError("Only broadcaster role can go live.");
+      return;
+    }
+
     if (!streamKey) {
       setError("Create or enter a stream key first.");
       return;
@@ -147,9 +255,6 @@ export default function App() {
     if (!mediaStreamRef.current) {
       await startCamera();
     }
-
-    const socket = ensureSocket();
-    socket.emit("broadcaster:start", { streamKey });
 
     const options = [
       "video/webm;codecs=vp8,opus",
@@ -164,30 +269,102 @@ export default function App() {
       videoBitsPerSecond: 1_500_000
     });
 
+    const socket = ensureSocket();
+    let canSendChunks = false;
+    const pendingChunks = [];
+    let firstChunkSeen = false;
+    let resolveFirstChunk;
+    const firstChunkPromise = new Promise((resolve) => {
+      resolveFirstChunk = resolve;
+    });
+
     let sendChain = Promise.resolve();
+    const flushPendingChunks = () => {
+      if (!canSendChunks || !pendingChunks.length) {
+        return;
+      }
+
+      while (pendingChunks.length) {
+        const blob = pendingChunks.shift();
+        sendChain = sendChain
+          .then(() => blob.arrayBuffer())
+          .then((buffer) => {
+            if (socket.connected) {
+              socket.emit("broadcaster:chunk", buffer);
+            }
+          })
+          .catch(() => {
+            setError("Chunk upload failed. Please restart the stream.");
+          });
+      }
+    };
+
     recorder.ondataavailable = (event) => {
       if (event.data.size === 0) {
         return;
       }
 
-      const blob = event.data;
-      sendChain = sendChain
-        .then(() => blob.arrayBuffer())
-        .then((buffer) => {
-          if (socket.connected) {
-            socket.emit("broadcaster:chunk", buffer);
-          }
-        })
-        .catch(() => {
-          setError("Chunk upload failed. Please restart the stream.");
-        });
+      pendingChunks.push(event.data);
+
+      if (!firstChunkSeen) {
+        firstChunkSeen = true;
+        resolveFirstChunk();
+      }
+
+      flushPendingChunks();
     };
 
     recorder.onerror = () => {
       setError("Recorder error occurred while broadcasting.");
     };
 
-    recorder.start(250);
+    recorder.start(500);
+
+    await Promise.race([
+      firstChunkPromise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error("No media chunk received")), 5000))
+    ]).catch(() => {
+      setError("No media captured from camera/mic. Check permissions and retry.");
+    });
+
+    if (!firstChunkSeen) {
+      recorder.stop();
+      return;
+    }
+
+    let broadcasterReady = false;
+    await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        socket.off("broadcaster:ready", onReady);
+        reject(new Error("Broadcaster setup timed out"));
+      }, 5000);
+
+      function onReady(payload) {
+        if (payload?.streamKey !== streamKey) {
+          return;
+        }
+
+        clearTimeout(timeout);
+        socket.off("broadcaster:ready", onReady);
+        broadcasterReady = true;
+        resolve();
+      }
+
+      socket.on("broadcaster:ready", onReady);
+      socket.emit("broadcaster:start", { streamKey, youtubeKey });
+    }).catch(() => {
+      setError("Failed to initialize broadcaster pipeline.");
+      return null;
+    });
+
+    if (!broadcasterReady) {
+      recorder.stop();
+      return;
+    }
+
+    canSendChunks = true;
+    flushPendingChunks();
+
     mediaRecorderRef.current = recorder;
     setBroadcasting(true);
   }
@@ -276,6 +453,7 @@ export default function App() {
     setLiveStatus(false);
     setPulses([]);
     setActivity([]);
+    setHighlights([]);
     setError("");
   }
 
@@ -292,6 +470,32 @@ export default function App() {
       </header>
 
       <main className="grid">
+        <section className="panel auth-panel">
+          <h2>Secure Access</h2>
+          {!user ? (
+            <>
+              <label>Email</label>
+              <input value={email} onChange={(event) => setEmail(event.target.value)} />
+
+              <label>Password</label>
+              <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} />
+
+              <div className="actions">
+                <button onClick={login}>Login</button>
+              </div>
+            </>
+          ) : (
+            <>
+              <p className="meta-inline">
+                Signed in as <strong>{user.email}</strong> with role <strong>{user.role}</strong>
+              </p>
+              <div className="actions">
+                <button onClick={logout}>Logout</button>
+              </div>
+            </>
+          )}
+        </section>
+
         <section className="panel controls">
           <div className="toggle">
             <button
@@ -319,6 +523,13 @@ export default function App() {
             value={streamKey}
             onChange={(event) => setStreamKey(event.target.value.toLowerCase())}
             placeholder="example: a1b2c3d4"
+          />
+
+          <label>YouTube RTMP Stream Key (optional)</label>
+          <input
+            value={youtubeKey}
+            onChange={(event) => setYoutubeKey(event.target.value.trim())}
+            placeholder="xxxx-xxxx-xxxx-xxxx-xxxx"
           />
 
           {generated && (
@@ -399,6 +610,23 @@ export default function App() {
               <div className="empty-block">No activity yet.</div>
             )}
           </div>
+        </section>
+
+        <section className="panel highlights">
+          <h2>Auto Highlights</h2>
+          <p>Generated from PulseMap peaks after stream stop.</p>
+          {highlights.length ? (
+            <div className="feed-list">
+              {highlights.map((item, index) => (
+                <a className="feed-item" key={`${item.peakBucket}-${index}`} href={item.clipUrl} target="_blank" rel="noreferrer">
+                  <strong>Highlight {index + 1}</strong>
+                  <span>Score {item.score}</span>
+                </a>
+              ))}
+            </div>
+          ) : (
+            <div className="empty-block">No highlights generated yet.</div>
+          )}
         </section>
       </main>
     </div>

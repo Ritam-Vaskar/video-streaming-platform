@@ -107,6 +107,10 @@ h1 {
   grid-column: span 4;
 }
 
+.auth-panel {
+  grid-column: span 4;
+}
+
 .media {
   grid-column: span 8;
 }
@@ -114,6 +118,15 @@ h1 {
 .pulse,
 .feed {
   grid-column: span 6;
+}
+
+.highlights {
+  grid-column: span 12;
+}
+
+.meta-inline {
+  color: #cddceb;
+  margin-top: 0.8rem;
 }
 
 .toggle {
@@ -326,10 +339,12 @@ button.danger {
 }
 
 @media (max-width: 1024px) {
+  .auth-panel,
   .controls,
   .media,
   .pulse,
-  .feed {
+  .feed,
+  .highlights {
     grid-column: span 12;
   }
 }
