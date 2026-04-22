@@ -1,0 +1,40 @@
+services:
+  rtmp:
+    image: alfg/nginx-rtmp:latest
+    container_name: stream-rtmp
+    command: ["nginx", "-c", "/opt/nginx.conf", "-g", "daemon off;"]
+    ports:
+      - "1935:1935"
+      - "8080:80"
+    volumes:
+      - ./rtmp/nginx.conf:/opt/nginx.conf:ro
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+    container_name: stream-backend
+    environment:
+      - PORT=5000
+      - RTMP_SERVER=rtmp://rtmp:1935/live
+      - CORS_ORIGIN=http://localhost:3000
+    ports:
+      - "5000:5000"
+    depends_on:
+      - rtmp
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_URL: http://localhost:5000
+        VITE_HLS_URL: http://localhost:8080/hls
+        VITE_SOCKET_URL: http://localhost:5000
+    container_name: stream-frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+      - rtmp
+    restart: unless-stopped
