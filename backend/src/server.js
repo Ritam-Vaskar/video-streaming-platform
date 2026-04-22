@@ -11,9 +11,12 @@ import { StreamManager } from "./streamManager.js";
 
 const port = Number(process.env.PORT || 5000);
 const abrRtmpTarget = process.env.RTMP_ABR_TARGET || "rtmp://rtmp:1935/hls";
+const recordRtmpTarget = process.env.RTMP_RECORD_TARGET || "rtmp://rtmp:1935/live";
 const youtubeRtmpBase = process.env.YOUTUBE_RTMP_BASE || "rtmp://a.rtmp.youtube.com/live2";
 const corsOrigin = process.env.CORS_ORIGIN || "http://localhost:3000";
 const highlightsDir = process.env.HIGHLIGHTS_DIR || "/app/media/highlights";
+const publicRtmpIngestUrl = process.env.PUBLIC_RTMP_INGEST_URL || "rtmp://localhost:1935/live";
+const publicHlsBaseUrl = process.env.PUBLIC_HLS_BASE_URL || "http://localhost:8080/hls";
 
 const app = express();
 app.use(express.json());
@@ -33,7 +36,11 @@ const authService = new AuthService();
 await authService.init();
 await fs.mkdir(highlightsDir, { recursive: true });
 
-const streamManager = new StreamManager({ abrRtmpTarget, youtubeRtmpBase });
+const streamManager = new StreamManager({
+  abrRtmpTarget,
+  recordRtmpTarget,
+  youtubeRtmpBase
+});
 const streamSessions = new Map();
 const pulseStore = new Map();
 
@@ -122,7 +129,12 @@ async function finalizeHighlights(streamKey) {
 }
 
 app.get("/health", (_, res) => {
-  res.json({ ok: true, ffmpegTarget: abrRtmpTarget });
+  res.json({
+    ok: true,
+    ffmpegTarget: abrRtmpTarget,
+    recordTarget: recordRtmpTarget,
+    playbackBase: publicHlsBaseUrl
+  });
 });
 
 app.post("/api/auth/register", async (req, res) => {
@@ -170,8 +182,8 @@ app.post("/api/stream/session", authService.authMiddleware({ roles: ["broadcaste
 
   res.status(201).json({
     streamKey,
-    ingestUrl: "rtmp://localhost:1935/live",
-    playbackUrl: `http://localhost:8080/hls/${streamKey}.m3u8`,
+    ingestUrl: publicRtmpIngestUrl,
+    playbackUrl: `${publicHlsBaseUrl}/${streamKey}.m3u8`,
     youtubeIngestBase: youtubeRtmpBase
   });
 });

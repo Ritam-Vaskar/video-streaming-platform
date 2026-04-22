@@ -1,8 +1,9 @@
 import { spawn } from "node:child_process";
 
 export class StreamManager {
-  constructor({ abrRtmpTarget, youtubeRtmpBase }) {
+  constructor({ abrRtmpTarget, recordRtmpTarget, youtubeRtmpBase }) {
     this.abrRtmpTarget = abrRtmpTarget;
+    this.recordRtmpTarget = recordRtmpTarget;
     this.youtubeRtmpBase = youtubeRtmpBase;
     this.processes = new Map();
   }
@@ -13,7 +14,7 @@ export class StreamManager {
     const target720 = `${this.abrRtmpTarget}/${streamKey}_720p`;
     const target480 = `${this.abrRtmpTarget}/${streamKey}_480p`;
     const target240 = `${this.abrRtmpTarget}/${streamKey}_240p`;
-    const targetRecord = "rtmp://rtmp:1935/live/" + streamKey;
+    const targetRecord = `${this.recordRtmpTarget}/${streamKey}`;
 
     const normalizedYoutubeKey = String(youtubeKey || "").trim();
     const youtubeTarget = normalizedYoutubeKey ? `${this.youtubeRtmpBase}/${normalizedYoutubeKey}` : null;
@@ -215,7 +216,7 @@ export class StreamManager {
         "warning",
         "-re",
         "-i",
-        `rtmp://rtmp:1935/live/${streamKey}`,
+        `${this.recordRtmpTarget}/${streamKey}`,
         "-c",
         "copy",
         "-f",
