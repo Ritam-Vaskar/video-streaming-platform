@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import Hls from "hls.js";
 import { io } from "socket.io-client";
 
@@ -17,7 +17,7 @@ function getPulseWeight(counts) {
   return counts.fire * 4 + counts.wow * 3 + counts.heart * 2 + counts.clap;
 }
 
-function PulseBars({ pulses }) {
+const PulseBars = memo(function PulseBars({ pulses }) {
   const bars = useMemo(() => {
     const last = pulses.slice(-16);
     const max = Math.max(1, ...last.map((entry) => getPulseWeight(entry.counts)));
@@ -41,7 +41,7 @@ function PulseBars({ pulses }) {
       ))}
     </div>
   );
-}
+});
 
 export default function App() {
   const [email, setEmail] = useState("broadcaster@pulsecast.local");
@@ -69,6 +69,9 @@ export default function App() {
   const mediaRecorderRef = useRef(null);
   const socketRef = useRef(null);
   const hlsRef = useRef(null);
+  const pulseQueueRef = useRef([]);
+  const activityQueueRef = useRef([]);
+  const flushRafRef = useRef(null);
 
   useEffect(() => {
     if (!authToken) {
@@ -99,6 +102,11 @@ export default function App() {
 
   useEffect(() => {
     return () => {
+      if (flushRafRef.current) {
+        cancelAnimationFrame(flushRafRef.current);
+        flushRafRef.current = null;
+      }
+
       stopBroadcast();
       stopViewer();
       if (mediaStreamRef.current) {
@@ -106,6 +114,37 @@ export default function App() {
       }
     };
   }, []);
+
+  const flushRealtimeQueues = () => {
+    flushRafRef.current = null;
+
+    if (pulseQueueRef.current.length) {
+      setPulses((prev) => {
+        const nextMap = new Map(prev.map((item) => [item.bucket, item.counts]));
+        for (const update of pulseQueueRef.current) {
+          nextMap.set(update.bucket, update.counts);
+        }
+
+        const merged = Array.from(nextMap.entries())
+          .sort((a, b) => a[0] - b[0])
+          .map(([bucket, counts]) => ({ bucket, counts }));
+        return merged.slice(-64);
+      });
+      pulseQueueRef.current = [];
+    }
+
+    if (activityQueueRef.current.length) {
+      setActivity((prev) => [...prev, ...activityQueueRef.current].slice(-30));
+      activityQueueRef.current = [];
+    }
+  };
+
+  const scheduleRealtimeFlush = () => {
+    if (flushRafRef.current) {
+      return;
+    }
+    flushRafRef.current = requestAnimationFrame(flushRealtimeQueues);
+  };
 
   function ensureSocket() {
     if (!socketRef.current) {
@@ -132,15 +171,13 @@ export default function App() {
       });
 
       socketRef.current.on("stream:pulse", ({ bucket, counts }) => {
-        setPulses((prev) => {
-          const next = prev.filter((entry) => entry.bucket !== bucket);
-          next.push({ bucket, counts });
-          return next.sort((a, b) => a.bucket - b.bucket);
-        });
+        pulseQueueRef.current.push({ bucket, counts });
+        scheduleRealtimeFlush();
       });
 
       socketRef.current.on("stream:activity", (event) => {
-        setActivity((prev) => [...prev.slice(-29), event]);
+        activityQueueRef.current.push(event);
+        scheduleRealtimeFlush();
       });
 
       socketRef.current.on("stream:highlights", ({ highlights: nextHighlights }) => {
